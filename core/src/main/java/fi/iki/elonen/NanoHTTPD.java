@@ -168,9 +168,12 @@ public abstract class NanoHTTPD {
 
         private final Socket acceptSocket;
 
-        private ClientHandler(InputStream inputStream, Socket acceptSocket) {
+        private HTTPSessionCallback callback;
+
+        private ClientHandler(InputStream inputStream, Socket acceptSocket, HTTPSessionCallback callback) {
             this.inputStream = inputStream;
             this.acceptSocket = acceptSocket;
+            this.callback = callback;
         }
 
         public void close() {
@@ -181,10 +184,13 @@ public abstract class NanoHTTPD {
         @Override
         public void run() {
             OutputStream outputStream = null;
+            HTTPSession session = null;
             try {
                 outputStream = this.acceptSocket.getOutputStream();
                 TempFileManager tempFileManager = NanoHTTPD.this.tempFileManagerFactory.create();
-                HTTPSession session = new HTTPSession(tempFileManager, this.inputStream, outputStream, this.acceptSocket.getInetAddress());
+                session = new HTTPSession(tempFileManager, this.inputStream, outputStream, this.acceptSocket.getInetAddress());
+                if (callback != null)
+                    callback.onSessionStart(session);
                 while (!this.acceptSocket.isClosed()) {
                     session.execute();
                 }
@@ -200,6 +206,8 @@ public abstract class NanoHTTPD {
                     NanoHTTPD.LOG.log(Level.FINE, "Communication with the client broken", e);
                 }
             } finally {
+                if (callback != null && session != null)
+                    callback.onSessionFinish(session);
                 safeClose(outputStream);
                 safeClose(this.inputStream);
                 safeClose(this.acceptSocket);
@@ -566,6 +574,8 @@ public abstract class NanoHTTPD {
 
         private String protocolVersion;
 
+        private HTTPSessionCallback callback;
+
         public HTTPSession(TempFileManager tempFileManager, InputStream inputStream, OutputStream outputStream) {
             this.tempFileManager = tempFileManager;
             this.inputStream = new BufferedInputStream(inputStream, HTTPSession.BUFSIZE);
@@ -573,11 +583,16 @@ public abstract class NanoHTTPD {
         }
 
         public HTTPSession(TempFileManager tempFileManager, InputStream inputStream, OutputStream outputStream, InetAddress inetAddress) {
+            this(tempFileManager, inputStream, outputStream, inetAddress, null);
+        }
+
+        public HTTPSession(TempFileManager tempFileManager, InputStream inputStream, OutputStream outputStream, InetAddress inetAddress, HTTPSessionCallback callback) {
             this.tempFileManager = tempFileManager;
             this.inputStream = new BufferedInputStream(inputStream, HTTPSession.BUFSIZE);
             this.outputStream = outputStream;
             this.remoteIp = inetAddress.isLoopbackAddress() || inetAddress.isAnyLocalAddress() ? "127.0.0.1" : inetAddress.getHostAddress().toString();
             this.headers = new HashMap<String, String>();
+            this.callback = callback;
         }
 
         /**
@@ -787,6 +802,9 @@ public abstract class NanoHTTPD {
                     safeClose(this.outputStream);
                     throw new SocketException("NanoHttpd Shutdown");
                 }
+                // Read any data from input stream
+                if (callback != null)
+                    callback.onRequestStart(this);
                 while (read > 0) {
                     this.rlen += read;
                     this.splitbyte = findHeaderEnd(buf, this.rlen);
@@ -873,6 +891,8 @@ public abstract class NanoHTTPD {
             } finally {
                 safeClose(r);
                 this.tempFileManager.clear();
+                if (callback != null)
+                    callback.onRequestFinish(this);
             }
         }
 
@@ -1789,6 +1809,8 @@ public abstract class NanoHTTPD {
 
     private Thread myThread;
 
+    private HTTPSessionCallback callback = null;
+
     /**
      * Pluggable strategy for asynchronously executing requests.
      */
@@ -1824,6 +1846,10 @@ public abstract class NanoHTTPD {
         setAsyncRunner(new DefaultAsyncRunner());
     }
 
+    public void setSessionCallback(HTTPSessionCallback sessionCallback) {
+        this.callback = sessionCallback;
+    }
+
     /**
      * Forcibly closes all connections that are open.
      */
@@ -1842,7 +1868,7 @@ public abstract class NanoHTTPD {
      * @return the client handler
      */
     protected ClientHandler createClientHandler(final Socket finalAccept, final InputStream inputStream) {
-        return new ClientHandler(inputStream, finalAccept);
+        return new ClientHandler(inputStream, finalAccept, callback);
     }
 
     /**
